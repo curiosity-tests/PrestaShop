@@ -41,8 +41,8 @@ permissions:
   contents: read   #   to clone the repos and get release assets (shivammathur/setup-php)
   id-token: write
 concurrency:
-  group: ${{ github.event_name }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.leg || 'push' }}
-  cancel-in-progress: true
+  group: ${{ github.event_name }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.leg || 'push' }}-${{ inputs.racecar_run }}
+  cancel-in-progress: false
 env:
   CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
 
