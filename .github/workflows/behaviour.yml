@@ -65,86 +65,153 @@ jobs:
         php: ${{ fromJSON(needs.workflow_matrix_generator.outputs.dynamic_matrix) }}
       fail-fast: false
     steps:
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: ${{ matrix.php }}
-          extensions: mbstring, intl, gd, xml, dom, json, fileinfo, curl, zip, iconv
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Setup MySQL
-        uses: shogo82148/actions-setup-mysql@v1
-        with:
-          mysql-version: "8.0"
-          root-password: 'password'
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ matrix.php }}
+        extensions: mbstring, intl, gd, xml, dom, json, fileinfo, curl, zip, iconv
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Setup MySQL
+      uses: shogo82148/actions-setup-mysql@v1
+      with:
+        mysql-version: "8.0"
+        root-password: 'password'
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
 
-      - uses: crashappsec/action-checkout@main
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
-          observables_continue_on_error: false
-          lfs: false
+    - uses: crashappsec/action-checkout@main
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        observables_continue_on_error: false
+        lfs: false
 
-      - name: Assert instrumentation is live
-        # Socket existence, not LD_PRELOAD: co-monitor's loader clears
-        # LD_PRELOAD once it has injected, so an empty value is what success
-        # looks like. co-hostd also daemonizes, so pgrep does not match it.
-        if: env.CHALK_ON == 'true'
-        run: |
-          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
-          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+    - name: PrestaShop Configuration
+      run: |
+        cp .github/workflows/phpunit/parameters.yml app/config/parameters.yml
+        cp .github/workflows/phpunit/parameters.php app/config/parameters.php
 
+    - name: Get Composer Cache Directory
+      id: composer-cache
+      run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
 
-      - name: PrestaShop Configuration
-        run: |
-          cp .github/workflows/phpunit/parameters.yml app/config/parameters.yml
-          cp .github/workflows/phpunit/parameters.php app/config/parameters.php
+    - name: Cache Node Directory
+      uses: actions/cache@v4
+      with:
+        path: ~/.npm
+        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: ${{ runner.os }}-node-
 
-      - name: Get Composer Cache Directory
-        id: composer-cache
-        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+    - name: Cache Composer Directory
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.composer-cache.outputs.dir }}
+        key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+        restore-keys: ${{ runner.os }}-composer-
 
-      - name: Cache Node Directory
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: ${{ runner.os }}-node-
+    - name: Composer Install
+      run: COMPOSER_PROCESS_TIMEOUT=600 composer install --ansi --prefer-dist --no-interaction --no-progress
 
-      - name: Cache Composer Directory
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
-          restore-keys: ${{ runner.os }}-composer-
+    - name: Build theme assets
+      run: make front-classic
 
-      - name: Composer Install
-        run: COMPOSER_PROCESS_TIMEOUT=600 composer install --ansi --prefer-dist --no-interaction --no-progress
+    - name: Install maildev
+      run: |
+        docker run -d -p 1080:1080 -p 1025:1025 maildev/maildev:2.2.1
+        bash -c 'while [[ "$(curl -L -s -o /dev/null -w %{http_code} http://localhost:1080)" != "200" ]]; do echo "Wait for maildev"; sleep 5; done'
 
-      - name: Build theme assets
-        run: make front-classic
+    - name: Run integration-behaviour-tests
+      run: composer run-script integration-behaviour-tests --timeout=0
+      env:
+        SYMFONY_DEPRECATIONS_HELPER: disabled
 
-      - name: Install maildev
-        run: |
-          docker run -d -p 1080:1080 -p 1025:1025 maildev/maildev:2.2.1
-          bash -c 'while [[ "$(curl -L -s -o /dev/null -w %{http_code} http://localhost:1080)" != "200" ]]; do echo "Wait for maildev"; sleep 5; done'
+    - name: Upload logs
+      uses: actions/upload-artifact@v5
+      if: failure()
+      with:
+        name: behaviour-${{ matrix.php }}
+        path: |
+          ./var/logs
 
-      - name: Run integration-behaviour-tests
-        run: composer run-script integration-behaviour-tests --timeout=0
-        env:
-          SYMFONY_DEPRECATIONS_HELPER: disabled
+    - name: Test git versionned files unchanged
+      run: git diff --exit-code
+    - name: Check observables and crashes
+      if: always() && env.CHALK_ON == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        root="${CURIOSITY_ROOT:-}"
+        home="${CURIOSITY_HOME:-/mnt/curiosity}"
+        obs="${home}/observables"
+        fail=0
 
-      - name: Upload logs
-        uses: actions/upload-artifact@v5
-        if: failure()
-        with:
-          name: behaviour-${{ matrix.php }}
-          path: |
-            ./var/logs
+        echo "::group::curiosity layout"
+        echo "CURIOSITY_ROOT=${root:-<unset>}"
+        echo "CURIOSITY_HOME=${home}"
+        ls -la "${obs}" 2>/dev/null || echo "no observables dir at ${obs}"
+        echo "::endgroup::"
 
-      - name: Test git versionned files unchanged
-        run: git diff --exit-code
+        # Observables for THIS run+attempt. The prefix matters: a stale file from an
+        # earlier run on the same mount would otherwise pass.
+        prefix="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+        shopt -s nullglob
+        mine=("${obs}/${prefix}"*)
+        if [ ${#mine[@]} -eq 0 ]; then
+          mine=("${obs}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observables"*)
+        fi
+        if [ ${#mine[@]} -eq 0 ]; then
+          echo "::error::no observables for run ${prefix} in ${obs} - instrumentation produced nothing"
+          fail=1
+        else
+          echo "observables present: ${#mine[@]} file(s)"
+          printf '  %s\n' "${mine[@]}"
+        fi
+
+        for f in "${mine[@]}"; do
+          case "$f" in
+            *.jsonl|*.json|*.combined)
+              if ! jq --slurp "." "$f" > /dev/null 2>&1; then
+                echo "::error::observables do not parse: $f"
+                fail=1
+              fi
+              ;;
+          esac
+        done
+
+        # Crash thresholds copied from check-run: a few null frames are noise, more than
+        # five is a stack walk into nothing.
+        for f in "${root}"/log/co-host*.log "${home}"/log/co-host*.log; do
+          [ -f "$f" ] || continue
+          echo "Asserting that there is no crash in $f"
+          if [ "$(grep -c 'p 00000000' "$f" 2>/dev/null || echo 0)" -gt 5 ] \
+            || [ "$(grep -E -c 'FATAL: Uncaught signal|Address not mapped at|RAX 0x.*RBX 0x' "$f" 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::error::crash signature in $f"
+            grep -E 'FATAL: Uncaught signal|Address not mapped at' "$f" | head -5 || true
+            fail=1
+          fi
+        done
+
+        cores=("${root}"/coredump.* "${home}"/coredump.*)
+        if [ ${#cores[@]} -gt 0 ]; then
+          echo "::error::coredump present: ${cores[*]}"
+          fail=1
+        fi
+
+        for f in "${root}"/runc.log "${root}"/runc.global.log \
+                 "${home}"/runc.log "${home}"/runc.global.log; do
+          [ -f "$f" ] || continue
+          if grep -q '^E:' "$f"; then
+            echo "::error::error in $f"
+            grep '^E:' "$f" | head -5
+            fail=1
+          fi
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::instrumentation check FAILED"
+          exit 1
+        fi
+        echo "instrumentation check passed"
