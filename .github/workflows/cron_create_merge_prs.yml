@@ -8,8 +8,6 @@
 name: Cron create merge PRs
 
 on:
-  schedule:
-    - cron: '0 6 * * 1'
   workflow_dispatch:
 
 permissions:

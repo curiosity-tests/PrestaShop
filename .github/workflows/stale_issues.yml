@@ -3,9 +3,6 @@
 name: Mark stale issues
 
 on:
-  schedule:
-    # Every 20 minutes from 00:00 to 05:59
-    - cron: "*/20 0-5 * * *"
   workflow_dispatch:
     inputs:
       debug-only:

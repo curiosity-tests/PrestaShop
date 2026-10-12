@@ -1,8 +1,6 @@
 name: Update PrestaShop composer packages
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 5 * * *'
 
 jobs:
   update-prestashop-packages:

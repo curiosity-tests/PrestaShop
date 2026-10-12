@@ -3,8 +3,6 @@
 name: Nightly tests (Report)
 
 on:
-  schedule:
-    - cron: '0 7 * * *'
   workflow_dispatch:
 
 jobs:
